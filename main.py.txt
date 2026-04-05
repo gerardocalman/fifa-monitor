@@ -1,0 +1,124 @@
+import time
+import schedule
+import yagmail
+import os
+from playwright.sync_api import sync_playwright
+
+URL = "https://fwc26-resale-usd.tickets.fifa.com/secure/selection/event/seat/performance/10229225516056"
+
+PRICE_THRESHOLD = 3000
+MIN_SEATS = 2
+
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+alert_sent = False
+
+
+def extract_offer_info(obj):
+    offers = []
+
+    def search(o, context={}):
+        if isinstance(o, dict):
+
+            block = o.get("section") or o.get("areaName") or context.get("block")
+            row = o.get("row") or o.get("rowLabel") or context.get("row")
+
+            price = o.get("price")
+            quantity = o.get("quantity") or o.get("availableQuantity")
+
+            if price and quantity:
+                try:
+                    price = int(price)
+                    quantity = int(quantity)
+
+                    if price < PRICE_THRESHOLD and quantity >= MIN_SEATS:
+                        offers.append({
+                            "price": price,
+                            "quantity": quantity,
+                            "block": block,
+                            "row": row
+                        })
+                except:
+                    pass
+
+            new_context = {
+                "block": block or context.get("block"),
+                "row": row or context.get("row")
+            }
+
+            for v in o.values():
+                search(v, new_context)
+
+        elif isinstance(o, list):
+            for item in o:
+                search(item, context)
+
+    search(obj)
+    return offers
+
+
+def check_prices():
+    global alert_sent
+
+    print("Checking...")
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            found_offers = []
+
+            def handle_response(response):
+                if "availability" in response.url:
+                    try:
+                        data = response.json()
+                        offers = extract_offer_info(data)
+                        found_offers.extend(offers)
+                    except:
+                        pass
+
+            page.on("response", handle_response)
+
+            page.goto(URL)
+            page.wait_for_timeout(8000)
+
+            browser.close()
+
+        if not found_offers:
+            print("No offers")
+            return
+
+        best = min(found_offers, key=lambda x: x["price"])
+
+        print(best)
+
+        if not alert_sent:
+            send_email(best)
+            alert_sent = True
+
+    except Exception as e:
+        print("Error:", e)
+
+
+def send_email(offer):
+    yag = yagmail.SMTP(EMAIL_USER, EMAIL_PASS)
+    yag.send(
+        to=EMAIL_TO,
+        subject="🚨 FIFA ALERT",
+        contents=f"""
+Price: ${offer['price']}
+Seats: {offer['quantity']}
+Block: {offer['block']}
+Row: {offer['row']}
+"""
+    )
+
+
+schedule.every(1).to(2).minutes.do(check_prices)
+
+while True:
+    schedule.run_pending()
+    time.sleep(5)
